@@ -1,0 +1,371 @@
+---
+title: "PML Prediction Assignment Writeup"
+author: "Georgy Makarov"
+date: 'March 11, 2020'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Task
+
+Predict the manner, in which people did the exercise. Use data from accelerometers on the belt, forearm, arm and dumbell of 6 participants. Train model to predict *classe* variable on training set. Test the model on testing set.
+
+## Prerequisite libraries
+
+We will use a number of libraries to run modelling functions.
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(modelr)
+library(caret)
+library(gbm)
+library(randomForest)
+library(C50)
+library(klaR)
+library(glmnet)
+library(mlbench)
+library(brnn)
+library(monomvn)
+library(neuralnet)
+library(ggplot2)
+library(adabag)
+library(doParallel)
+```
+
+## Data preparation
+
+Raw data comes in form of two *csv* files. We set up working directory and read the files.
+
+```{r, message=FALSE, warning=FALSE}
+setwd("C:/Users/Георгий/Documents/RStudio/pml_test")
+training_data <- read.csv("pml-training.csv")
+validation_data <- read.csv("pml-testing.csv")
+```
+
+Both datasets have 160 variables.
+
+```{r}
+dim(training_data)
+dim(validation_data)
+```
+
+## Exploratory data analysis
+
+Exploratory analysis of the training dataset shows that there are columns with metadata: X, username, window, timestamps. Those columns seem unlikely to affect the the classe of the assignment. Therefore we kick the metadata columns out of the dataset.
+
+```{r}
+training_data_rv <- dplyr::select(training_data, -(X:num_window))
+dim(training_data_rv)
+```
+
+There are columns with missing values. They are practically useless for classification. We omit *NA* values.
+
+```{r}
+train_data <- training_data_rv %>% 
+  select_if(~ !any(is.na(.)))
+dim(train_data)
+```
+
+With this general data preparation in place we split the training dataset into partitions. We split the data into 70/30 partitions.
+
+```{r}
+set.seed(12345)
+in_train <- createDataPartition(
+  y = train_data$classe,
+  p = 0.7,
+  list = FALSE
+)
+
+training_base <- train_data[in_train,]
+testing_base <- train_data[-in_train,]
+
+dim(training_base)
+dim(testing_base)
+```
+
+Further data manipulation is relevant to training partition. Exploratory analysis shows that there is large array of variables, which do not content significant variation. We filter attributes with near zero variation.
+
+```{r}
+nzv <- nearZeroVar(training_base)
+training <- training_base[,-nzv]
+dim(training)
+```
+
+There are variables that demonstrate similar variation patterns. We can merge them to more compact and bias resistant variable with PCA. Reduced amount of attributes will positively contribute to training speed. We set up PCA option in training section.
+
+## Training options
+
+We use spot-checking algorithm for training. This assumes that we take a small part of the training dataset and train 10 models on it. We choose top-3 performing models and repeat training on training partition. We judge model performance by *Accuracy*.
+
+```{r pressure, echo=FALSE}
+set.seed(12345)
+subs_dat <- createDataPartition(
+  y = training$classe,
+  p = 0.5,
+  list = FALSE
+)
+
+subs_tr <- training[subs_dat,]
+```
+
+Cross-validation method is repeated cross-validation with 10 folds and 3 repeats.
+
+```{r}
+seed <- 12345
+control <- trainControl(
+  method = "repeatedcv",
+  number = 10,
+  repeats = 3
+)
+
+metric <- "Accuracy"
+
+proc_tm <- proc.time() ### clock time
+```
+
+## Algorithm spot-check
+
+As our data is non-linear we use algorithms suited for this specific data distribution. We use linear discriminant analysis as a benchmark to compare how effective non-linear algorithms are. The pull of algorithms follows:
+
+1. Linear Discriminant Analysis - lda  
+2. Supported Vector Machine - svmRadial  
+3. Naive Bayes - nb  
+4. K Nearest Neighbours - knn  
+5. CART - rpart  
+6. Bagged CART - treebag  
+7. Stochastic Gradient Boosting - gbm  
+8. Bagged ada boost - adabag
+9. Random forest - rf  
+10. Parallel Random Forest - parRF  
+
+```{r, message=FALSE, warning=FALSE}
+
+## lda
+set.seed(seed)
+fit.lda <- train(
+  classe ~.,
+  data = subs_tr,
+  method = "lda",
+  metric = metric,
+  trControl = control,
+  preProcess = "pca"
+)
+
+## svmRadial
+set.seed(seed)
+fit.svm <- train(
+  classe ~.,
+  data = subs_tr,
+  method = "svmRadial",
+  metric = metric,
+  trControl = control,
+  preProcess = "pca",
+  fit = FALSE
+)
+
+## Naive Bayes
+set.seed(seed)
+fit.nb <- train(
+  classe ~.,
+  data = subs_tr,
+  method = "nb",
+  metric = metric,
+  trControl = control,
+  preProcess = "pca"
+)
+
+## kNN
+set.seed(seed)
+fit.knn <- train(
+  classe ~.,
+  data = subs_tr,
+  method = "knn",
+  metric = metric,
+  trControl = control,
+  preProcess = "pca"
+)
+
+## CART
+set.seed(seed)
+fit.cart <- train(
+  classe ~.,
+  data = subs_tr,
+  method = "rpart",
+  metric = metric,
+  trControl = control,
+  preProcess = "pca"
+)
+
+## bagged CART
+set.seed(seed)
+fit.treebag <- train(
+  classe ~.,
+  data = subs_tr,
+  method = "treebag",
+  metric = metric,
+  trControl = control,
+  preProcess = "pca"
+)
+
+## gbm
+set.seed(seed)
+fit.gbm <- train(
+  classe ~.,
+  data = subs_tr,
+  method = "gbm",
+  metric = metric,
+  trControl = control,
+  preProcess = "pca",
+  verbose = FALSE
+)
+
+## Bagged ada boost
+set.seed(seed)
+fit.adabag <- train(
+  classe ~.,
+  data = subs_tr,
+  method = "AdaBag",
+  metric = metric,
+  trControl = control,
+  preProcess = "pca"
+)
+
+## rf
+set.seed(seed)
+fit.rf <- train(
+  classe ~.,
+  data = subs_tr,
+  method = "rf",
+  metric = metric,
+  trControl = control
+)
+
+## parRF
+set.seed(seed)
+fit.parRF <- train(
+  classe ~.,
+  data = subs_tr,
+  method = "parRF",
+  metric = metric,
+  trControl = control
+)
+
+```
+
+## Model selection
+
+At this stage we have 10 models. We need to compared them. We are not looking at the best model at this stage. The goal is to select 3 algorithms to investigate further. We summarize results of the algorithms as a table.
+
+```{r}
+results <- resamples(
+  list(
+    lda = fit.lda,
+    svm = fit.svm,
+    nb = fit.nb,
+    kNN = fit.knn,
+    cart = fit.cart,
+    treebag = fit.treebag,
+    gbm = fit.gbm,
+    adabag = fit.adabag,
+    rf = fit.rf,
+    parRF = fit.parRF
+  )
+)
+
+summary(results)
+```
+
+We can get the results with visualization. It shows that models with good performance are Parallel Random Forest, Random Forest and bagged CART. We consider them for further investigation.
+
+```{r}
+dotplot(results)
+```
+
+## Training a model
+
+Now with top-3 models at hand we train them on the training dataset.
+
+```{r, message=FALSE, warning=FALSE}
+## parRF3
+set.seed(seed)
+fit.parRF3 <- train(
+  classe ~.,
+  data = training,
+  method = "parRF",
+  metric = metric,
+  trControl = control
+)
+
+## rf3
+set.seed(seed)
+fit.rf3 <- train(
+  classe ~.,
+  data = training,
+  method = "rf",
+  metric = metric,
+  trControl = control
+)
+
+## bagged CART
+set.seed(seed)
+fit.treebag3 <- train(
+  classe ~.,
+  data = training,
+  method = "treebag",
+  metric = metric,
+  trControl = control,
+  preProcess = "pca"
+)
+
+```
+
+Comparing the models allows us to choose the best model. Best model is random forest.
+
+```{r, message=FALSE, warning=FALSE}
+
+results3 <- resamples(
+  list(
+    treebag3 = fit.treebag3,
+    rf3 = fit.rf3,
+    parRF3 = fit.parRF3
+  )
+)
+
+summary(results3)
+
+```
+
+## Prediction on testing set
+
+Now test the model on testing set. We test Random forest model.
+
+```{r}
+
+pred.rf <- predict(fit.rf3, testing_base)
+confusionMatrix(pred.rf, testing_base$classe)
+
+```
+
+Overall accuracy of the algorithm is 99.4%, estimate out-of-sample error is 0.6%.
+
+## Prediction on validation set
+
+With model at hand we predict classes on validation dataset.
+
+```{r}
+
+pred.rf_val <- predict(fit.rf3, validation_data)
+validation_result <- data.frame(
+  problem_id = validation_data$problem_id,
+  predicted = pred.rf_val
+)
+print(validation_result)
+
+```
+
+## Conclusion
+
+Random forest model showed good accuracy and can be used for this type of classification.
